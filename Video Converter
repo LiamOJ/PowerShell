@@ -77,8 +77,8 @@ foreach($inputFile in get-childitem -recurse -Filter *.avi)
 	catch {
 		echo "[!] Error Encountered! \n $error"
 		echo "[*] Continuing to next file"
-		$inputFile | Out-File C:\Users\cold_\Documents\errors.txt -Append
-		$error | Out-File C:\Users\cold_\Documents\errors.txt -Append
+		$inputFile | Out-File C:\Users\liam\Documents\errors.txt -Append
+		$error | Out-File C:\Users\liam\Documents\errors.txt -Append
 		continue
 	}
 }
