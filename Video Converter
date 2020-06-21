@@ -1,0 +1,84 @@
+$outputExtension = ".mp4a"
+
+# Recursively iterate over the items in all folders
+# If item is .avi file type perform action
+<#The continue in the catch block means if there's an error in the for loop we could keep hitting on the same error for a while
+#>
+foreach($inputFile in get-childitem -recurse -Filter *.avi)
+{
+	echo "[*] Start process for $inputFile"
+	Try {
+	# This will get parent directory of current file, via variable
+	# Intention is to use this as the 'namespace' of the shell class
+	$dir = $inputFile | % { $_.FullName }
+	$parent_dir = [System.IO.Path]::GetDirectoryName($dir)
+
+	# Using Shell Property System name properties create com object 
+	# Define namespace as the directory of the current file
+	# Use the item variable to get full details - keep it targeted to the current inputFile
+	$shell = new-object -com shell.application
+	$folder = $shell.namespace($parent_dir)
+	$item = $folder.Items().Item($inputFile.Name)
+
+	# Basically, make an array (PSObject) of the detail and it's content
+	$FileMetaData = New-Object PSOBJECT
+	  for ($a ; $a  -le 600; $a++) # making this value larger than 266 means likely error
+	   { 
+		if($folder.getDetailsOf($item, $a))
+			{	#dict 		#key											                     #value
+				$hash += @{$($folder.getDetailsOf($folder.items, $a)) = $($folder.getDetailsOf($item, $a)) 
+			}
+		
+			$FileMetaData | Add-Member $hash -Erroraction 'silentlycontinue' #suppressing error, sorry. 
+			$hash.clear() 
+		   } #end if
+	   } #end for 
+	$a=0
+	
+	<#
+	Introduce error if rates are 0 (and/or not float)
+	#>
+	# Get value of object by name
+	# Basically just pulling the data out of the hash table
+	$old_data_rate = $FileMetaData."Data Rate"
+	$old_bit_rate = $FileMetaData."Bit Rate"
+	
+	#Extract the int from the string - not sure if this will always work but let's hope so
+	$data_rate = $old_data_rate -replace '\D+(\d+)\D+','$1'
+	$bit_rate = $old_bit_rate -replace '\D+(\d+)\D+','$1'
+	
+	# Cast from string to int
+	$data_rate = [int]$data_rate
+	$bit_rate = [int]$bit_rate
+	
+	# Try shrinking to see if it makes a difference
+	$data_rate = $data_rate * 0.75
+	
+	echo "[*] Rates to use: $data_rate and $bit_rate"
+	
+	echo "[*] Extracted and parsed meta data. Building VLC convertion command."
+
+	$outputFileName = [System.IO.Path]::GetFileNameWithoutExtension($inputFile.FullName) + $outputExtension;
+
+	$outputFileName = [System.IO.Path]::Combine($inputFile.DirectoryName, $outputFileName);
+
+	$processName = "C:\Program Files\VideoLAN\VLC\vlc.exe"
+
+	$processArgs = "-I dummy -vvv `"$($inputFile.FullName)`" --sout=#transcode{vcodec=h264,acodec=mp4a,vb=`"$data_rate`",ab=`"$bit_rate`",channels=2}:standard{access=`"file`",mux=`"ts`",dst=`"$outputFileName`"} vlc://quit"
+	
+	echo "[*] Writing file $outputFileName."
+	start-process $processName $processArgs -wait | Out-String
+	
+	echo "[*] Deleting old file. Oh dear..."
+	Remove-Item $inputFile.FullName
+	
+	echo "[*] Finished. Going to next file."
+	}
+	catch {
+		echo "[!] Error Encountered! \n $error"
+		echo "[*] Continuing to next file"
+		$inputFile | Out-File C:\Users\cold_\Documents\errors.txt -Append
+		$error | Out-File C:\Users\cold_\Documents\errors.txt -Append
+		continue
+	}
+}
