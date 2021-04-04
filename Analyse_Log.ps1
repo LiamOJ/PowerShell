@@ -1,4 +1,4 @@
-﻿function Analyse-Log {
+function Analyse-Log {
 
     <#
         .SYNOPSIS
@@ -6,7 +6,7 @@
             Logs currently known to work: Sysmon/Operational and Security 
             Current issues: errors with System (summary works, nothing else) and Powershell/Operational (4104 script blocks aren't working)
         .DESCRIPTION
-            Essentially a syntactically simple wrapper for Get-WinEvent.
+            Essentially a syntactically simple wrapper for Wevtutil.
             Queries a local or remote event log, parsing the event data into searchable fields. 
             It provides the some of the functionality of Xpaths but without the complex syntax. 
 
@@ -73,7 +73,7 @@
         .EXAMPLE
         This will get a summary of the default logs (Sysmon) for the last 5 hours from the default computer (current machine) and output. 
 
-        PS C:\Users\Z447692\Documents> Analyse-Log -TimePeriod 5 -Summary
+        PS C:\Users\User\Documents> Analyse-Log -TimePeriod 5 -Summary
         [*] Fetching logs ...
         [*] Logs fetched. Now analysing...
         [*] Number of events in the last 5 hours is: 970
@@ -108,7 +108,7 @@
         .EXAMPLE
         You can list the Field names for any event that is within the captured logs
 
-        PS C:\Users\Z447692\Documents> Analyse-Log -TimePeriod 5 -QueryID 1 -FieldList
+        PS C:\Users\User\Documents> Analyse-Log -TimePeriod 5 -QueryID 1 -FieldList
         [*] Fetching logs ...
         [*] Logs fetched. Now analysing...
         The state of the current PowerShell instance is not valid for this operation.
@@ -162,7 +162,7 @@
         .EXAMPLE
         You may then drill down further by looking for summaries of all other fields matching a specified Event ID and Field. In this case only 1 Field parameter should be specified. 
 
-        PS C:\Users\Z447692\Documents> Analyse-Log -TimePeriod 5 -QueryID 1 -Field Image -Value "*svchost.exe"
+        PS C:\Users\User\Documents> Analyse-Log -TimePeriod 5 -QueryID 1 -Field Image -Value "*svchost.exe"
         [*] Fetching logs ...
         [*] Logs fetched. Now analysing...
         Summary for 
@@ -205,7 +205,7 @@
         .EXAMPLE
         Here we can specify which SubFields we want displayed and to what depth (decided by the First N entries). 
 
-        PS C:\Users\Z447692\Documents> Analyse-Log -TimePeriod 5 -QueryID 1 -Field Image -Value "*firefox.exe" -SubField ParentImage,CommandLine -SummaryDepth 3
+        PS C:\Users\User\Documents> Analyse-Log -TimePeriod 5 -QueryID 1 -Field Image -Value "*firefox.exe" -SubField ParentImage,CommandLine -SummaryDepth 3
         [*] Fetching logs ...
         [*] Logs fetched. Now analysing...
         Summary for 
@@ -237,7 +237,7 @@
         .EXAMPLE
         If you wish to display the full log/s matching a specific query you can do so in the following way
 
-        PS C:\Users\Z447692\Documents> Analyse-Log -TimePeriod 5 -QueryID 1 -Field Image -Value "*firefox.exe" -Display -DisplayDepth 4
+        PS C:\Users\User\Documents> Analyse-Log -TimePeriod 5 -QueryID 1 -Field Image -Value "*firefox.exe" -Display -DisplayDepth 4
         [*] Fetching logs ...
         [*] Logs fetched. Now analysing...
         Summary for 
@@ -276,13 +276,48 @@
         Description                    Firefox                                                                          
 
         output truncated...
+
+        .EXAMPLE
+        To increase speed it is suggested you save remote logs using the -Save switch. This is demonstrated here. 
+
+        PS C:\WINDOWS\system32> Analyse-Log -TimePeriod 4 -ComputerName LT12345 -Save
+        [*] Fetching logs ...
+        [*] Logs fetched. Now analysing...
+        [!] There's no error handling here - beware dragons
+        This will save to C:\Temp. Please specify a filename: Someones_logs
+        [*] Phew, that seemed to work. :D
+
+        .EXAMPLE
+        To load a JSON file, such as that saved by the Save switch, you may do the following. This is the suggested way when working with remote logs. 
+        
+        PS C:\WINDOWS\system32> Analyse-Log -TimePeriod 12 -Load C:\temp\sysmon_logs.json -QueryID 1 -Field Image
+        [*] Fetching logs ...
+        [*] Logs fetched. Now analysing...
+        Summary for 
+         Event ID:1 
+         Field: Image
+
+        Count Name                                        
+        ----- ----                                        
+          108 C:\Windows\System32\svchost.exe             
+          107 C:\Windows\System32\wevtutil.exe            
+           28 C:\Windows\System32\PING.EXE                
+           27 C:\Program Files\Mozilla Firefox\firefox.exe
+           19 C:\Windows\System32\taskhostw.exe           
+           10 C:\Windows\SysWOW64\cmd.exe                 
+           10 C:\Windows\System32\dsregcmd.exe            
+           10 C:\Windows\System32\cmd.exe                 
+            8 C:\Windows\System32\msiexec.exe             
+            7 C:\Windows\System32\gpupdate.exe  
+
+
 #>
 
     [CmdletBinding()]
     Param (
 
         [Parameter(Mandatory = $false, Position = 0)]
-        [int32] $TimePeriod = 1,
+        [Float] $TimePeriod = 24,
 
         [Parameter(Mandatory = $false, Position = 0)]
         [String] $ComputerName = $env:COMPUTERNAME,
@@ -312,36 +347,51 @@
         [Switch] $Display,
 
         [Parameter(Mandatory = $false, Position = 0)]
+        [switch]$Save,
+
+        [Parameter(Mandatory = $false, Position = 0)]
+        [System.IO.FileInfo]$Load,
+
+        [Parameter(Mandatory = $false, Position = 0)]
         [Array] $SubField,
 
         [Parameter(Mandatory = $false, Position = 0)]
-        [String] $Path,
+        [System.IO.FileInfo]$Path,
 
         [Parameter(Mandatory = $false, Position = 0)]
-        [Switch] $RefreshData,
+        [String] $RefreshData,
 
         [Parameter(Mandatory = $false, Position = 0)]
-        [Int32] $DisplayDepth = 3
+        [Int32] $DisplayDepth = 3,
+
+        [Parameter(Mandatory = $false, Position = 0)]
+        [switch]$Interactive
 
         )
 
+    $all_events = $null
+    $Array_List = $null
+    $keys = $null
     # Local Variable, not intended for changing
     # Used to calculate time for XPath 
-    $Xpath_Time = (86400000/24)*$TimePeriod
+    [Int32]$Xpath_Time = (86400000/24)*$TimePeriod
     $XPath = "*[System[TimeCreated[timediff(@SystemTime) <= $Xpath_Time]]]"
     [System.Collections.ArrayList]$Array_List = @()
- 
+    $Hashmah = @{}
+    $default_Save_path = "C:\Temp\" + (Get-Date).ToString("dd-MM-yyyy") + "_Logs_" + $TimePeriod + "hours.json"
+    #[System.Collections.ArrayList]$specified_events = @()
+
     # Title: Delim Control
     # Purpose: Handles spacing/parsing issues, bespoke to each log
     # Method: provides the delimiter and padding to the hash table in the Log Parser function. 
     switch($Logname) {
         Microsoft-Windows-Sysmon/Operational {
             $delim = ":"
-            $spacing = 2 
+            $spacing = 1 
         }
         Security {
             $delim = ":"
-            $spacing = 2
+            $spacing = 1
         }
         Microsoft-Windows-Powershell/Operational {
             $delim = "="
@@ -360,183 +410,270 @@
     # Title: Log Collector
     # Purpose: Does the actual job of pulling the logs from the local or remote system
     # Method: Currently employs Get-WinEvent with time handled via XPaths. 
-    if ( $True ) {
+    # Issues: Will also need to test if requested time is larger than current time
+    if ( $all_events.length -eq 0 -or $refreshdata ) {
         Write-Host "[*] Fetching logs ..."
         try {
             if ( $Path ) {
-                $all_events = Get-WinEvent -Path $Path -ErrorAction Stop
+                $all_events = wevtutil.exe qe $Path /lf:$true /f:text /rd:true /q:$Xpath
+            } elseif ( $Load ) { 
+                $Array_List = Get-Content $Load | ConvertFrom-Json
             } else {
-                $all_events = Get-WinEvent -ComputerName $computername -LogName $logname -FilterXPath $Xpath -ErrorAction Stop
+                $all_events = wevtutil.exe /r:$ComputerName qe $logname /f:text /rd:true /q:$Xpath
             }
         } catch {
             Write-Host "No matching logs found"
             Return
         }
-
-        Write-Host "[*] Logs fetched. Now analysing..."
     }
-
 
     # Title: Log parser
     # Purpose: Parses all event objects into something searchable. 
     # Method: Breaks up each log entry into key:values pairs in a hashmap and stores them all in an arraylist
-    Foreach ($event in $all_events) {
-
-        # Occasional errors: FullyQualifiedErrorId : InvokeMethodOnNull
-	    $array_message = $event.Message.split("`n")
-	
-	    $Hashmah = @{}
-
-        # Add event data into table
-        $hashmah["EventID"] = $event.Id
-        $hashmah["Time"] = $event.TimeCreated
-    
-	    foreach ($line in $array_message) {  
+    if ( -not ($load) ) {
+        Write-Host "[*] Logs fetched. Now parsing..."
+        For ($counter = 1 ; $counter -le $all_events.Length ; $counter++ ) {
         
-            # To remove lines without a Key : Value relationship (not exactly fool proof)
-            if ( $line.IndexOf($delim) -eq -1 ) { Continue }
+            # Skip is the entry is null - this may create an issue with the event separation ?
 
-            # Spacing and delim are used for neatly parsing key:value relationships in log data strings
-            # The values change a little depending on which log we're lookng at, the switch at the top controls it
-            # Trim in value might break things that aren't strings?
-            $hashmah[$($line.substring(0,$line.IndexOf($delim))).Trim()] = $($line.Substring($line.IndexOf($delim)+$spacing)).Trim() 
-        
+            if ($all_events[$counter] -eq $null) {continue}
+
+            $line_to_be_split = $all_events[$counter] 
+
+            # Test if line has the delimiter in it - continue to next if it doesn't
+            if ( $line_to_be_split.IndexOf($delim) -eq -1 ) { 
+                # "Windows Powershell" logs use both : AND = delims, there would need to be a flag set to not 
+                # test for either in a line here (probably in the if condition e.g -OR $WinPS_flag is true
+                Continue 
+            }
+
+
+            # You reach a newline and the next line is a new event
+            # So add the current hash map to the array list, clear it and move on
+            if ($line_to_be_split -Match "^Event\[" ) {
+                $Array_List.Add($hashmah) > $null
+                $Hashmah = @{}
+                continue
+            }    
+
+            # Adds key:value pair to hash map - this will also capture keys with empty values
+            # TODO Add test to 
+            $hashmah_key = $($all_events[$counter].Split($delim)[0].Trim())
+            $hashmah_value = $($all_events[$counter].Substring($all_events[$counter].IndexOf($delim)+$spacing).Trim())
+            $hashmah[$hashmah_key] = $hashmah_value
+
         }
-
-        # The '> null' redirects the printed output to null rather than STDOUT
-        $Array_List.Add($hashmah) > $null
     }
 
+    # Title: Log Saver
+    # Purpose: Saves the variable $Array_List into a json file
+    # Method: Uses built in feature, with a suggested default location 
+    if ( $save ) {
+        Write-Host "[!] There's no error handling here - beware dragons" 
+
+        $incomplete_path = Read-Host "This will save to C:\temp. Specify a filename"
+
+        $full_path = "C:\Temp\" + $incomplete_path + ".json"
+
+        $Array_List | ConvertTo-Json -Depth 4 | Out-File $full_path
+
+        if ( Test-Path $full_path ) {
+            Write-Host "[*] Phew, that seemed to work. :D"
+        }
+    }
 
     # Title: Summary Generator
     # Purpose: To generate a brief summary of the log, getting all occuring event IDs and totals
     # Method: 
-    if ( $Summary -and -not $QueryID  ) {
-    
-       # Total logs
-        Write-Host "[*] Number of events in the last $($TimePeriod) hours is:" $all_events.Count
+    function Generate_Summary {
+        if ( $Summary -and -not $QueryID  ) {
+            Write-Host "Processing Summary"
+           # Total logs
+            Write-Host "[*] Number of events in the last $($TimePeriod) hours is:" $Array_List.Count
 
-        # List unique values
-        Write-Host "[*] IDs of events seen in last $($TimePeriod) hours"
-        $event_IDs = $all_events | Sort-Object -Property ID -Unique | Select-Object ID,Message
-        $event_IDs
+            # List unique values
+            Write-Host "[*] IDs of events seen in last $($TimePeriod) hours"
+            $print_event_IDs = $Array_List."Event ID" | Group-Object | Select -Property Count,Name,@{Name = 'Percent'; Expression = {($_.Count/$Array_List.Count).tostring("P") }} | Sort -Property count -Descending
 
-        # Get count of each type of event
-        Write-Host "Get Counts"
-        $all_events | Group-Object -Property id | Select-Object -Property Name,Count,@{Name = 'Percent'; Expression = {($_.Count/$all_events.Count).tostring("P") }} | 
-        Sort-Object -Property Count -Descending | Format-table
+            # Merge data with event IDs with the task. Pretty slow way of doing this. Refactor at some point. 
+            $collection = @()
+
+            foreach ($line in $print_event_IDs) {
+            $collection += [pscustomobject] @{
+                    EventID   = $line.Name
+                    EventName = ($Array_List | where "Event ID" -eq $line.Name | select -first 1).Task
+                    EventCount = $line.Count
+                    EventPercent = $line.Percent
+                }
+            }
+
+            $collection | Format-Table -AutoSize
+        }
+    }
+    Generate_Summary
     
+    # Title: Key parser
+    # Purpose: To stop needing to repeatedly pull keys out we'll do it once and store 
+    # Method: use pipeline to pull unique IDs. Iterate over, pulling keys from first match and adding to hashmap based on event ID. 
+    $hashmap_of_event_keys_by_event_id = @{}
+    $all_event_ids = $Array_List."Event ID" | Sort -Unique
+
+    if ( $load ) {
+        foreach ( $each_unique_id in $all_event_ids ){
+           $keys_to_be_added = foreach ($property in ($Array_List | where {$_."Event ID" -eq 1} | select -first 1 | Get-Member)) { if ($property.MemberType -eq "NoteProperty") { $property.Name } }
+           $hashmap_of_event_keys_by_event_id.add([int32]$each_unique_id, $keys_to_be_added)
+           #$hashmap_of_event_keys_by_event_id[$each_unique_id]
+        }
+    } else {
+        foreach ( $each_unique_id in $all_event_ids ){
+           $keys_to_be_added = ($Array_List | where {$_."Event ID" -eq $each_unique_id} | select -first 1).keys 
+           $hashmap_of_event_keys_by_event_id.add([int32]$each_unique_id, $keys_to_be_added)
+           #$hashmap_of_event_keys_by_event_id[$each_unique_id]
+        }
     }
 
     # Title: List all field names
     # Purpose: Provides the user with a list of fields for a given event
-    # Method: selects 1 matching event and loops over the hashmap keys. Cannot generate fields if event did not occur in time frame. 
-    if ( $QueryID -and $FieldList ) {
-        foreach ($ID_Queried in $QueryID) {
-            $keys = foreach ($field_name in $($Array_List | where eventid -eq $ID_Queried | select -first 1) ) { $field_name.Keys }
-
-            Write-Host "Field Names for Event ID $($ID_Queried)"
-            $keys
+    # Method: selects 1 matching event and loops over the hashmap keys. Cannot generate fields if event did not occur in time frame.
+    function Generate_FieldList { 
+        if ( $QueryID -and $FieldList ) {
+            foreach ($ID_Queried in $QueryID) {
+                Write-Host "Field Names for Event ID $($ID_Queried)"
+                $hashmap_of_event_keys_by_event_id[$ID_Queried]
+            }
         }
     }
+    Generate_FieldList
 
+    
+    # Experimental interactive mode
+    Do {
+    
+        # Title: Query Based Analysis - By Key (Field)
+        # Purpose: Does the actual breakdow
+        # Method: iterates over QueryID array, getting field names (or  using supplied ones) and displays the data based on that by iterating over the array list for matching keys.  
+        if ( ($field -or $QueryID -ne "") -and -not $FieldList) {
+            Write-Host "[*] Logs parsed. Now analysing..."
+            foreach ($ID_Queried in $QueryID) {
 
-    # Title: Query Based Analysis - By Key (Field)
-    # Purpose: Does the actual breakdow
-    # Method: iterates over QueryID array, getting field names (or  using supplied ones) and displays the data based on that by iterating over the array list for matching keys.  
-    if ( ($field -or $QueryID) -and -not $FieldList) {
-        foreach ($ID_Queried in $QueryID) {
+                #$ID_Queried = [Int32]$ID_Queried
+                $keys = $hashmap_of_event_keys_by_event_id[$ID_Queried]
 
-            $ID_Queried = [Int32]$ID_Queried
-            $keys = foreach ($field_name in $($Array_List | where eventid -eq $ID_Queried | select -first 1) ) { $field_name.Keys }
+                # This provides the more drilled down functionality of Value and SubField (sub functionality of QueryID)
+                if ( $field -and $value ) { 
 
-            # This provides the more drilled down functionality of Value and SubField (sub functionality of QueryID)
-            if ( $field -and $value -ne "" ) { 
+                    # If SubField specified use those fields
+                    if ( $SubField ) { $keys = $SubField }
 
-                # If SubField specified use those fields
-                if ( $SubField ) { $keys = $SubField }
+                    foreach ($key in $keys) {
 
-                foreach ($key in $keys) {
+                        Write-Host "Summary for `n Event ID:$ID_Queried `n Field: $key"
 
-                    Write-Host "Summary for `n Event ID:$ID_Queried `n Field: $key"
+                        $specified_events = $Array_List | where "event id" -eq $ID_Queried | where $($field) -like $value
 
-                    $specified_events = $Array_List | where eventid -eq $ID_Queried | where $($field) -like $value
+                        # This does the printing, and also handles subfield printing. 
+                        if ( $Display ) {
+                            $events_to_display = $specified_events | Select-Object -first $DisplayDepth
 
-                    # This does the printing, and also handles subfield printing. 
-                    if ( $Display ) {
-                        $events_to_display = $specified_events | Select-Object -first $DisplayDepth
-
-                        foreach ($display_item in $events_to_display ) {
-                            if ( $SubField ) {
-                                foreach ( $subfield_to_print in $SubField ) {
-                                    $display_item.$subfield_to_print
+                            foreach ($display_item in $events_to_display ) {
+                                if ( $SubField ) {
+                                    foreach ( $subfield_to_print in $SubField ) {
+                                        $display_item.$subfield_to_print
+                                        Write-Host "-----------------------------------------"
+                                    }
+                                } else {
+                                    $display_item
                                     Write-Host "-----------------------------------------"
                                 }
-                            } else {
-                                $display_item
-                                Write-Host "-----------------------------------------"
                             }
-                        }
                         
-                    } else {                                                              
-                        $output_table = ($specified_events).$key | Group-Object
+                        } else {                                                              
+                            $output_table = ($specified_events).$key | Group-Object
         
-                        $output_table | Sort-Object -Property Count -Descending | Select count,name -First $SummaryDepth | Format-table -wrap
-                    } 
-                    if ( $display ) { Return }
-                } # end of iteration over keys/subfields
-            }
+                            $output_table | Sort-Object -Property Count -Descending | Select count,name -First $SummaryDepth | Format-table -wrap
+                        } 
+                        if ( $display ) { Return }
+                    } # end of iteration over keys/subfields
+                }
             
-            # This provides the basic functionality of QueryID and Field
-            if ( $ID_Queried -and $value -eq ""){
-                
-                # If fields specified, use those fields rather than keys
-                if ( $field ) { $keys = $field }
+                # This provides the basic functionality of QueryID and Field
+                # This test was always coming back false, not sure why changed to true
+                if (  $ID_Queried -and $value -eq "" ){
+                    # If fields specified, use those fields rather than keys
+                    if ( $field ) { $keys = $field }
 
-                foreach ($key in $keys) {
+                    foreach ($key in $keys) {
 
-                    Write-Host "Summary for `n Event ID:$ID_Queried `n Field: $key"
+                        Write-Host "Summary for `n Event ID:$ID_Queried `n Field: $key"
+                                                       
 
-                    $specified_events = $Array_List | where {$_.eventid -eq $ID_Queried}
+                        $specified_events = $Array_List | where {$_."event id" -eq $ID_Queried}
 
-                    if ( $display ) {
-                        $events_to_display = $specified_events | Select-Object -first $DisplayDepth
+                        if ( $display ) {
+                            $events_to_display = $specified_events | Select-Object -first $DisplayDepth
 
-                        foreach ($display_item in $events_to_display ) {
-                            $display_item
-                            Write-Host "-----------------------------------------"                           
+                            foreach ($display_item in $events_to_display ) {
+                                $display_item | Format-Table -AutoSize
+                                Write-Host "-----------------------------------------"                           
+                            }
+                          return # put here to exit loop after printing. Not a great way to handle it but w/e
+                        } else {
+                            $output_table = ($specified_events).$key | Group-Object
+
+                            $output_table | Sort-Object -Property Count -Descending | Select count,name -First $SummaryDepth | Format-table -wrap 
                         }
-                      return # put here to exit loop after printing. Not a great way to handle it but w/e
-                    } else {
-                        $output_table = ($specified_events).$key | Group-Object
-
-                        $output_table | Sort-Object -Property Count -Descending | Select count,name -First $SummaryDepth | Format-table -wrap 
                     }
                 }
-            }
-        }# end query foreach
-    }#end if
+            }# end query foreach
+        }#end if
+        
+        if ( $Interactive ) {
+            $value = $null
+            $field = $null
+            $QueryID = $null
+            $FieldList = $null
+            $Summary = $null
+            Write-Host "Analyse-Log Interactive Mode - This mode will keep the data loaded into memory. 
+            Limitations:
+            You cannot enter more than one QueryID, Field or Value.
+            Do not place values in `"quotations`"
+            Cannot generate Summary
+            If a variable is Off/On enter any value to use" -Fore cyan
 
-} #end of script
+            $inputs = Read-Host "Exit to leave. Return to continue"
+            if ( $inputs -eq "exit" ) {
+                return
+            }
+            [Int32]$QueryID = Read-Host "QueryID"
+            [String]$Field = Read-Host "Field"
+            [String]$Value = Read-Host "Value"
+            [String]$Summary = Read-Host "Summary"
+            [Int32]$SummaryDepth = Read-Host "SummaryDepth"
+            if ( -NOT($SummaryDepth) ) { $SummaryDepth = 10 }
+
+            
+            Generate_FieldList
+            Generate_Summary
+        } 
+
+
+    } While ( $Interactive ) # end of while loop interactive mode 
+    #Return $Array_List
+}#end of script
+
+
     <#
     TO DOs
-    - List fields for specific logs e.g. -QueryID 1 -FieldList should produce Image, ParentImage, etc
-    - Next thing would be to search by a field inside an event ID and pull all the matching events out
-        e.g. ID is 1 and image is C:\Windows\System32\cmd.exe would show all matching events
-    - Log refresh feature - to blank out $all_events (only seems to be an issue when you want to lengthen the time?)
-    - As above, add test condition to make sure the time period of the current logs >= asked for logs 
-    - DONE Wrap the query based analysis in a for loop that iterates over the specified query ID
+    - Expand Interactive mode with more variables 
+    - Add local export functionality
     - Add a 'Reverse' switch that changes it from First n to Last n
-    - Add handling for Powershell/Operational 4104 (Script block logging) so it separates the script block into its own key:value pair. 
-    - DONE: Add Path parameter
-    - Add Print with limit 
+    - Add a suppress feature that excludes certain criteria
+    - A 'Basic Analysis' switch that gets the 3 busiest events and for each of those gets the 3 busiest fields (exl some noise)
 
+    Known Issues:
+    - PowerShell event 4104 Scripting block is a mess
+    - It's slow af
+    - Can't look at a value lower than 1 hour. 
 
-    #Fields to consider removing from keys: time, UTCTime, ProcessGUID, Description, fileversion, processid
-    # Consider filtering them by default but have a switch for 'full data'
 
     #>
-
-
-# For debugging purposes, allows me to manipulate the data without calling the cmdlet
-$external_array_list = $Array_List
