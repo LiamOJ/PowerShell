@@ -1,5 +1,5 @@
 $file_array = [System.Collections.ArrayList]::new()   
-$file_array.add("C:\Temp\Chrome Firefox 15-03-2021 - 21-03-2021 (Official Sensitive).csv") > $null
+$file_array.add("C:\Temp\report.csv") > $null
 $file_array.add("C:\Temp\Spreadsheet 2.csv") > $null
 $file_array.add("C:\Temp\Spreadsheet 3.csv") > $null
 $file_array.add("C:\Temp\Spreadsheet 4.csv") > $null
