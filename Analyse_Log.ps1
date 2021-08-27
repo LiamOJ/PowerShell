@@ -307,7 +307,7 @@ function Analyse-Log {
 
 #>
 
-    [CmdletBinding()]
+       [CmdletBinding()]
     Param (
 
         [Parameter(Mandatory = $false, Position = 0)]
@@ -368,12 +368,15 @@ function Analyse-Log {
 
     $all_events = $null
     $Array_List = $null
+    $broken_data = $null
+    $final_data = $null
     $keys = $null
     # Local Variable, not intended for changing
     # Used to calculate time for XPath 
     [Int32]$Xpath_Time = (86400000/24)*$TimePeriod
     $XPath = "*[System[TimeCreated[timediff(@SystemTime) <= $Xpath_Time]]]"
     [System.Collections.ArrayList]$Array_List = @()
+    [System.Collections.ArrayList]$broken_data = @();
     $Hashmah = @{}
     $default_Save_path = "C:\Temp\" + (Get-Date).ToString("dd-MM-yyyy") + "_Logs_" + $TimePeriod + "hours.json"
     #[System.Collections.ArrayList]$specified_events = @()
@@ -384,28 +387,29 @@ function Analyse-Log {
     # Issues: Will also need to test if requested time is larger than current time
     Write-Host "[*] Fetching logs ..."
     try {
-        if ( $Path -and -not $MaxEvents) {
-                $all_events = wevtutil.exe qe $Path /lf:$true /rd:true /q:$Xpath
-            } elseif ( $Path -and $MaxEvents ) {
-                $all_events = wevtutil.exe qe $Path /lf:$true /rd:true /c:$MaxEvents
-            } elseif ( $Load ) { 
-                $Array_List = Get-Content $Load | ConvertFrom-Json
-            } elseif ($MaxEvents) {
-                $all_events = wevtutil.exe /r:$ComputerName qe $logname /rd:true /c:$MaxEvents
-            } elseif ($TimePeriod) {
-                $all_events = wevtutil.exe /r:$ComputerName qe $logname /rd:true /q:$Xpath
-            }
+        # This builds the command line for wevtutil. Each parameter must be done separately. Dunno why
+        # This provides an example for building a command for another binary.
+        $New_Path = $Path.FullName
+        $all_events = C:\windows\system32\wevtutil.exe `
+        qe `
+        /r:$ComputerName `
+        /rd:true `
+        $(if ($Path) {"$New_Path"} else {"$Logname"}) `
+        $(if ($Path) {"/lf:true"}) `
+        $(if ($Xpath) {"/q:$($Xpath)"}) `
+        $(if ($MaxEvents) {"/c:$($MaxEvents)"}) 
     } catch {
         Write-Host "No matching logs found"
         Return
     }
+    Write-Host "[*] Logs fetched ..."
 
     # Title: Log parser
     # Purpose: Parses all event objects into something searchable. 
     # Method: Breaks up each log entry into key:values pairs in a hashmap and stores them all in an arraylist
-    if ( -not ($load) ) {
-        Write-Host "[*] Logs fetched. Now parsing..."
-            foreach ($event in $all_events) { 
+    function Parse-Log ($all_events_in_function) {
+        Write-Host "[*] Parsing logs..."
+            foreach ($event in $all_events_in_function) { 
     
             # =================
             # Convert Wevtutil XML string to Powershell XML object and error handling thereof
@@ -413,17 +417,9 @@ function Analyse-Log {
                 # Convert event into XML event
                 $xml_event = [XML]$event
             } catch {
-                # For some reason occasionally events are split in two, this should stitch them back together
-                # When it encounters the first error it saves it and moves on
-                # The next error is stitched to the end of that one and the holder cleared
-                if ( -NOT ($first_half_of_corrupted_event) ) {
-                    $first_half_of_corrupted_event = $event
-                    continue
-                } else {
-                    #$joined_events = $first_half_of_corrupted_event + $event
-                    #$xml_event = [XML]$joined_events
-                    #$first_half_of_corrupted_event = $null
-                }
+                # new approach to fixing broken data. Gather broken stuff into a broken variable
+                $broken_data.add($event) > $null
+                continue # not doing anything with the broken data, just gathering it for now
             }
 
             # Declare new hashtable to be used - it has to be done in the loop
@@ -449,7 +445,17 @@ function Analyse-Log {
             $eventdata = $xml_event.Event.EventData.Data
 
             foreach ($event_data_row in $Eventdata) {
-                $hash_table_of_individual_event.add($event_data_row.Name, $event_data_row.'#text')
+                try{
+                    $hash_table_of_individual_event.add($event_data_row.Name, $event_data_row.'#text')
+                } catch {
+                    #$event_data_row
+                    # We'll sometimes come here if the eventdata can't be neatly segmented down into lines
+                    # Handling this would probably be dealt with on a case by case basis and would take a lot of work
+                    # The security log and sysmon don't ever come here, just windows powershell so far. 
+                    # likewise Powershell/Operational is tricky as it contains scriptblocks.
+                    Write-Host "I cannae do this, cap'n" -ForegroundColor DarkCyan
+                    Return
+                }
             }
    
             # =================
@@ -457,6 +463,41 @@ function Analyse-Log {
             $Array_List.Add($hash_table_of_individual_event) > $null       
         }
     }
+    Parse-Log($all_events)
+
+    # Title: XML Fixer
+    # Purpose: wevtutil returns broken xml objects because of whitespace
+    # Method: iterate over broken xml fixing known issues
+    function fix-xml ($broken_data) {
+        Write-Host "[*] Repairing damaged XML..."
+         # fix or remove things we know break XML
+         $broken_data = $broken_data -replace '<\?xml version="1\.0" encoding="UTF-16"\?>',""
+         $broken_data = $broken_data -replace "&gt;",">"
+         $broken_data = $broken_data -replace "&lt;","<" 
+
+         # removed rogue data, now needs to be concatenated together right
+         [System.Collections.ArrayList]$final_data = @()
+         $object = ""
+
+         foreach ($chunk in $broken_data) {
+            if ($chunk -like "*</Event>*") { #if it's the end of the event we do something different
+                $object += $chunk #cumulatively add last line of broken data to the object we'll input into the final result
+                $final_data.Add($object) # input that final bit of data
+                $object = "" # clear that object because we've reached the end of the event as per the </event> tag
+            } else {
+                $object += $chunk #comes here if it's not the end of the event, so just continue building the object
+            }
+         }
+
+         return $final_data # this whole thing should return a string of XML structured data that can be converted now
+    }
+
+    # if there's noticably broken XML returned from wevtutil do this
+    if ($broken_data){
+        $final_data = fix-xml($broken_data)
+        Parse-Log($final_data)
+    }
+
 
     # Title: Log Saver
     # Purpose: Saves the variable $Array_List into a json file
@@ -480,7 +521,7 @@ function Analyse-Log {
     # Method: 
     function Generate_Summary {
         if ( $Summary -and -not $QueryID  ) {
-            Write-Host "Processing Summary"
+            Write-Host "[*] Processing Summary"
            # Total logs
             Write-Host "[*] Number of events in the last $($TimePeriod) hours is:" $Array_List.Count
 
@@ -491,13 +532,55 @@ function Analyse-Log {
             # Merge data with event IDs with the task. Pretty slow way of doing this. Refactor at some point. 
             $collection = @()
 
-            foreach ($line in $print_event_IDs) {
-            $collection += [pscustomobject] @{
-                    EventID   = $line.Name
-                    EventName = ($Array_List | where "EventID" -eq $line.Name | select -first 1).Task
-                    EventCount = $line.Count
-                    EventPercent = $line.Percent
+            # Fairly hacky way to pull out names for Sysmon events, dynamically matches to event ID but doesn't work for other log sources.           
+            $sysmon_event_names = (wevtutil gp Microsoft-Windows-Sysmon /ge:true | select-string SysmonTask-SYSMONEVENT) -replace " ","" | %{$_ -replace "name:SysmonTask-SYSMONEVENT_", ""}
+            
+            # Better? way of getting event names - won't work if the manifest isn't present on this computer. Maybe better to
+            # split this off into its own function and make it a little more complete e.g. will try local first and if not present will
+            # try remote 
+            try {
+                $manifest_event_hash_table = @{}
+
+                # remove channel from logname
+                $Logname = $Logname -replace "\/.*",""
+
+                $raw_publisher_data = get-winevent -listprovider $Logname -ErrorAction SilentlyContinue
+
+                # if $foo.Events has data, come here
+
+                # if $foo.Events has no data, you need the publisher info from the log and repeat the above query with that
+                if ($raw_publisher_data.Events) {
+                    foreach ($event in ($raw_publisher_data.Events)) {
+                        $manifest_event_id =  $event.id
+                        $manifest_event_name = (($event.description -split "`n")[0] -split ":")[0] 
+        
+                        # skip key if already present - manifests contain multiple entries for the same ID
+
+                        if ($manifest_event_hash_table.keys -contains $manifest_event_id) { continue }
+
+                        # Add to dict
+                        $manifest_event_hash_table.add($manifest_event_id,$manifest_event_name)
+                    }
+                } else { 
+                    # Write-Host "CANT FETCH EVENT NAME"
                 }
+            } catch {
+                $manifest_event_hash_table = @{}
+
+            }
+            # Build custom PS Object
+            foreach ($line in $print_event_IDs) {
+                if ($manifest_event_hash_table[[Int64]$line.Name]) {
+                    $eventname = $manifest_event_hash_table[[Int64]$line.Name]
+                } else {
+                    $eventname = "..."
+                }
+                $collection += [pscustomobject] @{
+                        EventID   = $line.Name
+                        EventName = $eventname
+                        EventCount = $line.Count
+                        EventPercent = $line.Percent
+                    }
             }
 
             $collection | Format-Table -AutoSize
@@ -551,13 +634,14 @@ function Analyse-Log {
             if ( $field -and $value ) { 
 
                 # If SubField specified use those fields
+                #if ( $field ) { $keys = $field }
                 if ( $SubField ) { $keys = $SubField }
 
                 foreach ($key in $keys) {
 
                     Write-Host "Summary for `n Event ID:$ID_Queried `n Field: $key"
 
-                    $specified_events = $Array_List | where {$_.EventID -eq $ID_Queried} | where $($field) -like $value
+                    $specified_events = $Array_List | ? {$_.EventID -eq $ID_Queried} | where $($field) -like $value
 
                     # This does the printing, and also handles subfield printing. 
                     if ( $Display ) {
@@ -616,3 +700,21 @@ function Analyse-Log {
     }#end if
         
 }#end of script
+
+
+    <#
+    TO DOs
+    - Expand Interactive mode with more variables 
+    - Add local export functionality
+    - Add a 'Reverse' switch that changes it from First n to Last n
+    - Add a suppress feature that excludes certain criteria
+    - A 'Basic Analysis' switch that gets the 3 busiest events and for each of those gets the 3 busiest fields (exl some noise)
+
+    Known Issues:
+    - PowerShell event 4104 Scripting block is a mess
+    - It's slow af
+    - Can't look at a value lower than 1 hour. 
+
+
+    #>
+
