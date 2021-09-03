@@ -302,7 +302,34 @@ function Analyse-Log {
            10 C:\Windows\System32\dsregcmd.exe            
            10 C:\Windows\System32\cmd.exe                 
             8 C:\Windows\System32\msiexec.exe             
-            7 C:\Windows\System32\gpupdate.exe  
+            7 C:\Windows\System32\gpupdate.exe 
+            
+            
+        .EXAMPLE
+        To search all logs (meaning every Event ID) for a specific field/value match:
+
+        PS C:\WINDOWS\system32> Analyse-Log -TimePeriod 1 -QueryID $(1..26) -field image -value "*powershell.exe*"
+        [*] Fetching logs ...
+        [*] Logs fetched ...
+        [*] Parsing logs...
+        [*] Logs parsed. Now analysing...
+        Summary for 
+         Event ID:1 
+         Field: IntegrityLevel
+
+        Count Name  
+        ----- ----  
+            1 High  
+            1 Medium
+
+
+        Summary for 
+         Event ID:1 
+         Field: ParentCommandLine
+
+        Count Name                   
+        ----- ----                   
+            2 C:\WINDOWS\Explorer.EXE
 
 
 #>
@@ -311,7 +338,7 @@ function Analyse-Log {
     Param (
 
         [Parameter(Mandatory = $false, Position = 0)]
-        [Float] $TimePeriod,
+        [Float] $TimePeriod, # needs an error message here
 
         [Parameter(Mandatory = $false, Position = 0)]
         [Int32] $MaxEvents,
@@ -320,7 +347,7 @@ function Analyse-Log {
         [String] $ComputerName = $env:COMPUTERNAME,
 
         [Parameter(Mandatory = $false, Position = 0)]
-        [Array] $QueryID,
+        [Array] $QueryID,# = $null, # testing this for the analysis function entry conditions
 
         [Parameter(Mandatory = $false, Position = 0)]
         [Switch] $Summary,
@@ -341,13 +368,10 @@ function Analyse-Log {
         [Switch] $FieldList,
 
         [Parameter(Mandatory = $false, Position = 0)]
+        [Switch] $ShowBlanks,
+
+        [Parameter(Mandatory = $false, Position = 0)]
         [Switch] $Display,
-
-        [Parameter(Mandatory = $false, Position = 0)]
-        [switch]$Save,
-
-        [Parameter(Mandatory = $false, Position = 0)]
-        [System.IO.FileInfo]$Load,
 
         [Parameter(Mandatory = $false, Position = 0)]
         [Array] $SubField,
@@ -356,30 +380,24 @@ function Analyse-Log {
         [System.IO.FileInfo]$Path,
 
         [Parameter(Mandatory = $false, Position = 0)]
-        [String] $RefreshData,
-
-        [Parameter(Mandatory = $false, Position = 0)]
-        [Int32] $DisplayDepth = 3,
-
-        [Parameter(Mandatory = $false, Position = 0)]
-        [switch]$Interactive
+        [Int32] $DisplayDepth = 3
 
         )
-
+    
+    # Because this cmdlet tends to get run over and over in the same session we need to clear the variables or there will be blood
     $all_events = $null
     $Array_List = $null
     $broken_data = $null
     $final_data = $null
     $keys = $null
+
     # Local Variable, not intended for changing
-    # Used to calculate time for XPath 
+    # Used to calculate time for XPath - takes 24 hours in milliseconds and breaks down into hours. Bit faffy but there you do
     [Int32]$Xpath_Time = (86400000/24)*$TimePeriod
     $XPath = "*[System[TimeCreated[timediff(@SystemTime) <= $Xpath_Time]]]"
     [System.Collections.ArrayList]$Array_List = @()
     [System.Collections.ArrayList]$broken_data = @();
-    $Hashmah = @{}
-    $default_Save_path = "C:\Temp\" + (Get-Date).ToString("dd-MM-yyyy") + "_Logs_" + $TimePeriod + "hours.json"
-    #[System.Collections.ArrayList]$specified_events = @()
+    $Hashmah = @{} #yes I misspelled hashmap, no I didn't change it, yes it's a bad variable name either way 
 
     # Title: Log Collector
     # Purpose: Does the actual job of pulling the logs from the local or remote system
@@ -389,7 +407,7 @@ function Analyse-Log {
     try {
         # This builds the command line for wevtutil. Each parameter must be done separately. Dunno why
         # This provides an example for building a command for another binary.
-        $New_Path = $Path.FullName
+        $New_Path = $Path.FullName # manipulating the path object in situ wasn't working, did it here instead
         $all_events = C:\windows\system32\wevtutil.exe `
         qe `
         /r:$ComputerName `
@@ -449,7 +467,7 @@ function Analyse-Log {
                     $hash_table_of_individual_event.add($event_data_row.Name, $event_data_row.'#text')
                 } catch {
                     #$event_data_row
-                    # We'll sometimes come here if the eventdata can't be neatly segmented down into lines
+                    # We'll sometimes come here if the eventdata can't be neatly segmented down into key value pairs by way of name:#text
                     # Handling this would probably be dealt with on a case by case basis and would take a lot of work
                     # The security log and sysmon don't ever come here, just windows powershell so far. 
                     # likewise Powershell/Operational is tricky as it contains scriptblocks.
@@ -466,11 +484,11 @@ function Analyse-Log {
     Parse-Log($all_events)
 
     # Title: XML Fixer
-    # Purpose: wevtutil returns broken xml objects because of whitespace
+    # Purpose: wevtutil returns broken xml objects because ... who knows why, but here we are.
     # Method: iterate over broken xml fixing known issues
     function fix-xml ($broken_data) {
         Write-Host "[*] Repairing damaged XML..."
-         # fix or remove things we know break XML
+         # fix or remove things we know break XML -beware, if these things appear in the logs themselves they are also being replaced. 
          $broken_data = $broken_data -replace '<\?xml version="1\.0" encoding="UTF-16"\?>',""
          $broken_data = $broken_data -replace "&gt;",">"
          $broken_data = $broken_data -replace "&lt;","<" 
@@ -495,26 +513,9 @@ function Analyse-Log {
     # if there's noticably broken XML returned from wevtutil do this
     if ($broken_data){
         $final_data = fix-xml($broken_data)
-        Parse-Log($final_data)
+        Parse-Log($final_data) # this function adds onto the arraylist without destroying it first, so it's safe to do this. 
     }
 
-
-    # Title: Log Saver
-    # Purpose: Saves the variable $Array_List into a json file
-    # Method: Uses built in feature, with a suggested default location 
-    if ( $save ) {
-        Write-Host "[!] There's no error handling here - beware dragons" 
-
-        $incomplete_path = Read-Host "This will save to C:\temp. Specify a filename"
-
-        $full_path = "C:\Temp\" + $incomplete_path + ".json"
-
-        $Array_List | ConvertTo-Json -Depth 4 | Out-File $full_path
-
-        if ( Test-Path $full_path ) {
-            Write-Host "[*] Phew, that seemed to work. :D"
-        }
-    }
 
     # Title: Summary Generator
     # Purpose: To generate a brief summary of the log, getting all occuring event IDs and totals
@@ -531,11 +532,8 @@ function Analyse-Log {
 
             # Merge data with event IDs with the task. Pretty slow way of doing this. Refactor at some point. 
             $collection = @()
-
-            # Fairly hacky way to pull out names for Sysmon events, dynamically matches to event ID but doesn't work for other log sources.           
-            $sysmon_event_names = (wevtutil gp Microsoft-Windows-Sysmon /ge:true | select-string SysmonTask-SYSMONEVENT) -replace " ","" | %{$_ -replace "name:SysmonTask-SYSMONEVENT_", ""}
             
-            # Better? way of getting event names - won't work if the manifest isn't present on this computer. Maybe better to
+            # Way of getting event names - won't work if the manifest isn't present on this computer. Maybe better to
             # split this off into its own function and make it a little more complete e.g. will try local first and if not present will
             # try remote 
             try {
@@ -545,8 +543,6 @@ function Analyse-Log {
                 $Logname = $Logname -replace "\/.*",""
 
                 $raw_publisher_data = get-winevent -listprovider $Logname -ErrorAction SilentlyContinue
-
-                # if $foo.Events has data, come here
 
                 # if $foo.Events has no data, you need the publisher info from the log and repeat the above query with that
                 if ($raw_publisher_data.Events) {
@@ -612,94 +608,83 @@ function Analyse-Log {
     function Generate_FieldList { 
         if ( $QueryID -and $FieldList ) {
             foreach ($ID_Queried in $QueryID) {
-                Write-Host "Field Names for Event ID $($ID_Queried)"
+                Write-Host "`nField Names for Event ID $($ID_Queried)"
                 $hashmap_of_event_keys_by_event_id[$ID_Queried]
             }
         }
     }
     Generate_FieldList
 
-    
     # Title: Query Based Analysis - By Key (Field)
     # Purpose: Does the actual breakdow
     # Method: iterates over QueryID array, getting field names (or  using supplied ones) and displays the data based on that by iterating over the array list for matching keys.  
-    if ( ($field -or $QueryID -ne "") -and -not $FieldList) {
+    if ( ($field -or $QueryID) -and -not $FieldList) {
         Write-Host "[*] Logs parsed. Now analysing..."
         foreach ($ID_Queried in $QueryID) {
 
-            #$ID_Queried = [Int32]$ID_Queried
-            $keys = $hashmap_of_event_keys_by_event_id[$ID_Queried]
+            # Here we specify which keys (log fields) we want to display/show in the table
 
-            # This provides the more drilled down functionality of Value and SubField (sub functionality of QueryID)
-            if ( $field -and $value ) { 
+            # Do this if we're looking for a specific value in a field and only want a limited display
+            if ( $Field -and $Value -and $SubField ) { $keys = $SubField }
+            # Do this if we're looking for a specific field with any value
+            if ( $Field -and -not $Value) { $keys = $Field }
+            # come here if they've got a field and a value and just want all keys
+            if ( $Field -and $Value -and -not $SubField) { $keys = $hashmap_of_event_keys_by_event_id[$ID_Queried] }
+            # Come here if they just want all data for that queryID
+            if (-not $Field) { $keys = $hashmap_of_event_keys_by_event_id[$ID_Queried] }
+             # Come here if they're asking for a field and subfield with no values, is wrong. 
+            if ( $Field -and $SubField -and -not $Value ) {Write-Host "Please also specify a Value. What you're asking for doesn't make sense" -ForegroundColor Cyan; Return }
 
-                # If SubField specified use those fields
-                #if ( $field ) { $keys = $field }
-                if ( $SubField ) { $keys = $SubField }
+            # Now that we know what they're looking for, iterate over that and extract data from the hashtable
+            foreach ($key in $keys) {
+                    
+                # TODO -- This needs changed to reflect if there's a feild selected in the result or not. Does it tho?
+#                Write-Host "Summary for `n Event ID:$ID_Queried `n Field: $key"
 
-                foreach ($key in $keys) {
+                if ($Value) {
+                    $specified_events = $Array_List | ? {$_.EventID -eq $ID_Queried} | ? $($field) -like $value
+                } else {
+                    $specified_events = $Array_List | ? {$_.EventID -eq $ID_Queried}
+                }
 
-                    Write-Host "Summary for `n Event ID:$ID_Queried `n Field: $key"
+                # This does the printing, and also handles subfield printing. 
+                if ( $Display ) {
+                    $events_to_display = $specified_events | Select-Object -first $DisplayDepth
 
-                    $specified_events = $Array_List | ? {$_.EventID -eq $ID_Queried} | where $($field) -like $value
-
-                    # This does the printing, and also handles subfield printing. 
-                    if ( $Display ) {
-                        $events_to_display = $specified_events | Select-Object -first $DisplayDepth
-
-                        foreach ($display_item in $events_to_display ) {
-                            if ( $SubField ) {
-                                foreach ( $subfield_to_print in $SubField ) {
-                                    $display_item.$subfield_to_print
-                                    Write-Host "-----------------------------------------"
-                                }
-                            } else {
-                                $display_item
+                    foreach ($display_item in $events_to_display ) {
+                        if ( $SubField ) {
+                            foreach ( $subfield_to_print in $SubField ) {
+                                $display_item.$subfield_to_print
                                 Write-Host "-----------------------------------------"
                             }
+                        } else {
+                            $display_item
+                            Write-Host "-----------------------------------------"
                         }
+                    }
                         
-                    } else {                                                              
-                        $output_table = ($specified_events).$key | Group-Object
-        
-                        $output_table | Sort-Object -Property Count -Descending | Select count,name -First $SummaryDepth | Format-table -wrap
-                    } 
-                    if ( $display ) { Return }
-                } # end of iteration over keys/subfields
-            }
-            
-            # This provides the basic functionality of QueryID and Field
-            # This test was always coming back false, not sure why changed to true
-            if (  $ID_Queried -and $value -eq "" ){
-                # If fields specified, use those fields rather than keys
-                if ( $field ) { $keys = $field }
+                } else {
+                    # This is so that we won't see empty fields, can make debugging painful so you may wish to remove it at those times. 
+                    if (-not $specified_events -and -not $ShowBlanks) { continue }
 
-                foreach ($key in $keys) {
+                    if (-not ($specified_events).$key) { Write-Host "Event ID:$ID_Queried has Field $Field and Value $Value, but has no $key field" -ForegroundColor DarkYellow; continue }
 
                     Write-Host "Summary for `n Event ID:$ID_Queried `n Field: $key"
-                                                       
-
-                    $specified_events = $Array_List | where {$_.EventID -eq $ID_Queried}
-
-                    if ( $display ) {
-                        $events_to_display = $specified_events | Select-Object -first $DisplayDepth
-
-                        foreach ($display_item in $events_to_display ) {
-                            $display_item | Format-Table -AutoSize
-                            Write-Host "-----------------------------------------"                           
-                        }
-                        return # put here to exit loop after printing. Not a great way to handle it but w/e
-                    } else {
-                        $output_table = ($specified_events).$key | Group-Object
-
-                        $output_table | Sort-Object -Property Count -Descending | Select count,name -First $SummaryDepth | Format-table -wrap 
-                    }
-                }
-            }
-        }# end query foreach
-    }#end if
+                                                                                  
+                    $output_table = ($specified_events).$key | Group-Object 
         
-}#end of script
+                    $output_table | Sort-Object -Property Count -Descending | Select count,name -First $SummaryDepth | Format-table -wrap
+                } 
+                # You're in a loop here, if we don't return we'll display the logs repeatedly
+                if ( $display ) { Return }
+
+            } #END  foreach ($key in $keys)
+
+        } #END foreach ($ID_Queried in $QueryID) {
+
+    } #END if ( ($field -or $QueryID -ne "") -and -not $FieldList
+        
+} #END of script
 
 
     <#
