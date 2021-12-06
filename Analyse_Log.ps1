@@ -542,7 +542,7 @@ function Analyse-Log {
                 # remove channel from logname
                 $Logname = $Logname -replace "\/.*",""
 
-                $raw_publisher_data = get-winevent -listprovider $Logname -ErrorAction SilentlyContinue
+                $raw_publisher_data = get-winevent -listprovider $Logname -ErrorAction SilentlyContinue -ComputerName $ComputerName
 
                 # if $foo.Events has no data, you need the publisher info from the log and repeat the above query with that
                 if ($raw_publisher_data.Events) {
