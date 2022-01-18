@@ -57,6 +57,10 @@ function Analyse-Log {
             Takes the log from the specified path rather than the local or a remote system.
             E.g. Analyse-Log -Path C:\Temp\logs.evtx -TimePeriod 12 -QueryID 1 -Field Image -Value C:\Windows\System32\cmd.exe 
 
+        .PARAMETER Raw
+            Outputs a PsCustomObject table containing all the data gathered, providing easy interface with other cmdlets. 
+            E.g. Analyse-Log -TimePeriod 24 -QueryID $(1..25) -Raw
+
         .PARAMETER DisplayDepth
             Limits the printed out logs to the specified number. The Default is 3. 
             E.g. Analyse-Log -TimePeriod 5 -QueryID 1 -Field Image -Value "*firefox.exe" -Display -DisplayDepth 4
@@ -331,6 +335,18 @@ function Analyse-Log {
         ----- ----                   
             2 C:\WINDOWS\Explorer.EXE
 
+        .EXAMPLE
+        To get a PSCustomObject as output, for ease of interfacing with other cmdlets. 
+
+        PS C:\WINDOWS\system32> $alldata = Analyse-Log -TimePeriod 24 -QueryID $(1..25) -Raw
+        [*] Fetching logs ...
+        [*] Logs fetched ...
+        [*] Parsing logs...
+        [*] Repairing damaged XML...
+        [*] Parsing logs...
+        [*] Logs parsed. Now analysing...
+        [*] Releasing raw output
+
 
 #>
 
@@ -380,6 +396,9 @@ function Analyse-Log {
         [System.IO.FileInfo]$Path,
 
         [Parameter(Mandatory = $false, Position = 0)]
+        [Switch] $Raw,
+
+        [Parameter(Mandatory = $false, Position = 0)]
         [Int32] $DisplayDepth = 3
 
         )
@@ -398,6 +417,17 @@ function Analyse-Log {
     [System.Collections.ArrayList]$Array_List = @()
     [System.Collections.ArrayList]$broken_data = @();
     $Hashmah = @{} #yes I misspelled hashmap, no I didn't change it, yes it's a bad variable name either way 
+    [System.Collections.ArrayList]$accumulated_raw_event_data = @()
+
+    # Function to convert hashtable to powershell custom object
+    function ConvertTo-Object($hashtable) 
+    {
+       $object = New-Object PSObject
+       $hashtable.GetEnumerator() | 
+          ForEach-Object { Add-Member -inputObject $object `
+	  	    -memberType NoteProperty -name $_.Name -value $_.Value }
+       $object
+    }
 
     # Title: Log Collector
     # Purpose: Does the actual job of pulling the logs from the local or remote system
@@ -416,6 +446,7 @@ function Analyse-Log {
         $(if ($Path) {"/lf:true"}) `
         $(if ($Xpath) {"/q:$($Xpath)"}) `
         $(if ($MaxEvents) {"/c:$($MaxEvents)"}) 
+        # could theoretically expand the efficiency by doing /q:"*[System[(EventID=$QueryID[0] or EventID=$QueryID[1])]]" etc here
     } catch {
         Write-Host "No matching logs found"
         Return
@@ -428,7 +459,7 @@ function Analyse-Log {
     function Parse-Log ($all_events_in_function) {
         Write-Host "[*] Parsing logs..."
             foreach ($event in $all_events_in_function) { 
-    
+           
             # =================
             # Convert Wevtutil XML string to Powershell XML object and error handling thereof
             try {
@@ -455,13 +486,13 @@ function Analyse-Log {
             $hash_table_of_individual_event.add('Computer',$system_data_holder.Computer)
             $hash_table_of_individual_event.add('Time',$system_data_holder.TimeCreated.SystemTime)
             $hash_table_of_individual_event.add('EventRecordID',$system_data_holder.EventRecordID)
-
+           
 
             # ==================
             # Event Data Section
             # The event data is, arguably, all useful and not nested. 
             $eventdata = $xml_event.Event.EventData.Data
-
+            measure-command -Expression {
             foreach ($event_data_row in $Eventdata) {
                 try{
                     $hash_table_of_individual_event.add($event_data_row.Name, $event_data_row.'#text')
@@ -475,10 +506,12 @@ function Analyse-Log {
                     Return
                 }
             }
-   
+            } 1>>C:\temp\command_output_old.txt 
             # =================
             # Add finished hashtable to array list
-            $Array_List.Add($hash_table_of_individual_event) > $null       
+            
+            $Array_List.Add($hash_table_of_individual_event) > $null 
+              
         }
     }
     Parse-Log($all_events)
@@ -635,18 +668,18 @@ function Analyse-Log {
              # Come here if they're asking for a field and subfield with no values, is wrong. 
             if ( $Field -and $SubField -and -not $Value ) {Write-Host "Please also specify a Value. What you're asking for doesn't make sense" -ForegroundColor Cyan; Return }
 
+            
+            # I moved this out of the for loop below as it's not needed there
+            if ($Value) {
+                $specified_events = $Array_List | ? {$_.EventID -eq $ID_Queried} | ? $($field) -like $value
+            } else {
+                $specified_events = $Array_List | ? {$_.EventID -eq $ID_Queried}
+            }
+            
+
             # Now that we know what they're looking for, iterate over that and extract data from the hashtable
             foreach ($key in $keys) {
-                    
-                # TODO -- This needs changed to reflect if there's a feild selected in the result or not. Does it tho?
-#                Write-Host "Summary for `n Event ID:$ID_Queried `n Field: $key"
-
-                if ($Value) {
-                    $specified_events = $Array_List | ? {$_.EventID -eq $ID_Queried} | ? $($field) -like $value
-                } else {
-                    $specified_events = $Array_List | ? {$_.EventID -eq $ID_Queried}
-                }
-
+                   
                 # This does the printing, and also handles subfield printing. 
                 if ( $Display ) {
                     $events_to_display = $specified_events | Select-Object -first $DisplayDepth
@@ -667,12 +700,16 @@ function Analyse-Log {
                     # This is so that we won't see empty fields, can make debugging painful so you may wish to remove it at those times. 
                     if (-not $specified_events -and -not $ShowBlanks) { continue }
 
+                    if ($Raw) { continue } # trying to get a way to access the underlying object from outside the cmdlet
+
                     if (-not ($specified_events).$key) { Write-Host "Event ID:$ID_Queried has Field $Field and Value $Value, but has no $key field" -ForegroundColor DarkYellow; continue }
 
                     Write-Host "Summary for `n Event ID:$ID_Queried `n Field: $key"
                                                                                   
                     $output_table = ($specified_events).$key | Group-Object 
-        
+                    
+                    # Do a Format switch here, which changes what comes out. 
+                    # However, binding it 
                     $output_table | Sort-Object -Property Count -Descending | Select count,name -First $SummaryDepth | Format-table -wrap
                 } 
                 # You're in a loop here, if we don't return we'll display the logs repeatedly
@@ -680,10 +717,19 @@ function Analyse-Log {
 
             } #END  foreach ($key in $keys)
 
+            if ($Raw) {
+                $accumulated_raw_event_data += $specified_events
+            }
+
         } #END foreach ($ID_Queried in $QueryID) {
 
     } #END if ( ($field -or $QueryID -ne "") -and -not $FieldList
         
+    if ($Raw) {
+        Write-Host "[*] Releasing raw output"
+        $hashtable_convert_to_pscustomobject = @() ;foreach($table in $accumulated_raw_event_data) { $hashtable_convert_to_pscustomobject += ConvertTo-Object($table) }
+        return $hashtable_convert_to_pscustomobject
+    }
 } #END of script
 
 
@@ -699,7 +745,5 @@ function Analyse-Log {
     - PowerShell event 4104 Scripting block is a mess
     - It's slow af
     - Can't look at a value lower than 1 hour. 
-
-
     #>
 
