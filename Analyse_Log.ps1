@@ -746,4 +746,3 @@ function Analyse-Log {
     - It's slow af
     - Can't look at a value lower than 1 hour. 
     #>
-
