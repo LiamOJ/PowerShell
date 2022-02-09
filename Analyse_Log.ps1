@@ -492,7 +492,7 @@ function Analyse-Log {
             # Event Data Section
             # The event data is, arguably, all useful and not nested. 
             $eventdata = $xml_event.Event.EventData.Data
-            measure-command -Expression {
+
             foreach ($event_data_row in $Eventdata) {
                 try{
                     $hash_table_of_individual_event.add($event_data_row.Name, $event_data_row.'#text')
@@ -506,7 +506,7 @@ function Analyse-Log {
                     Return
                 }
             }
-            } 1>>C:\temp\command_output_old.txt 
+
             # =================
             # Add finished hashtable to array list
             
@@ -731,18 +731,3 @@ function Analyse-Log {
         return $hashtable_convert_to_pscustomobject
     }
 } #END of script
-
-
-    <#
-    TO DOs
-    - Expand Interactive mode with more variables 
-    - Add local export functionality
-    - Add a 'Reverse' switch that changes it from First n to Last n
-    - Add a suppress feature that excludes certain criteria
-    - A 'Basic Analysis' switch that gets the 3 busiest events and for each of those gets the 3 busiest fields (exl some noise)
-
-    Known Issues:
-    - PowerShell event 4104 Scripting block is a mess
-    - It's slow af
-    - Can't look at a value lower than 1 hour. 
-    #>
