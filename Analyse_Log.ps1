@@ -452,6 +452,27 @@ function Analyse-Log {
         Return
     }
     Write-Host "[*] Logs fetched ..."
+    
+    # some issues with PowerShell (or wevtutil) incorrectly serialising the returned string
+    # Solution is to deserialise into a single line and fix from there. 
+    # May be unncessary on Win 10 as issue has only appeared on Win 11 thus far 
+    $all_events = -join $all_events
+
+    # Check if the returned object is an array of string or a single string
+    if($all_events.count -eq 1) {
+        # if it is we're going to assume the events aren't properly split up, which breaks this cmdlet
+        # This could cause issues if only 1 log is returned - other issues may arise due to broken XML and that correction may have to occur 
+            #here rather than later. Would likely mean a reduction in performance
+
+        # The split/serialisation is done on the </Event> tag 
+        $all_events = $all_events -split "</Event>" | %{$_ + "</Event>"}
+
+        #remove errant </Event> 
+        if ($all_events[-1] -eq '</Event>') {
+            $all_events[-1] = $null
+        }
+
+    }
 
     # Title: Log parser
     # Purpose: Parses all event objects into something searchable. 
@@ -729,5 +750,19 @@ function Analyse-Log {
         Write-Host "[*] Releasing raw output"
         $hashtable_convert_to_pscustomobject = @() ;foreach($table in $accumulated_raw_event_data) { $hashtable_convert_to_pscustomobject += ConvertTo-Object($table) }
         return $hashtable_convert_to_pscustomobject
+
+        <#
+        Fix for the export-CSV not returning all fields
+            $column_names = $logs | %{$_.psobject.properties.name} | select -Unique
+            $column_names += "Injected"
+            $result = $logs | select $column_names -ErrorAction SilentlyContinue | Sort time
+        #>
+
+        <#
+            Might need to replace wevtutil with some custom code, given the strange returns
+            https://www.c-sharpcorner.com/UploadFile/d551d3/reading-and-querying-eventviewer-efficiently-with-C-Sharp/
+            That shows an easy way to do it in C# - might be worth looking into when I have more time. 
+        #>
+
     }
 } #END of script
